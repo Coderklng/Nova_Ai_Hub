@@ -16,8 +16,11 @@ export const metadata: Metadata = {
   title: "NovaAI",
   description: "NovaAI SaaS & Agent Workspace",
   manifest: "/manifest.webmanifest",
+  verification: {
+    google: "pMd7UNs5hVw9fCKbCMD8RYjFWIerGN5veMcv769oa1I",
+  },
   icons: {
-    icon:[{url:"/icon.svg",type:"image/svg+xml"}],
+    icon: [{ url: "/icon.svg", type: "image/svg+xml" }],
     shortcut: "/icon.svg",
     apple: "/icon.svg",
   },
