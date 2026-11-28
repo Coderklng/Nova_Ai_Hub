@@ -24,6 +24,7 @@ import {
   Download,
   Maximize2,
   Image as ImageIcon,
+  Video as VideoIcon,
 } from "lucide-react";
 
 type BackendMode = "chat" | "agent";
@@ -36,11 +37,12 @@ interface AgentMode {
   prompt: string;
 }
 
-interface ImageAttachment {
+interface MediaAttachment {
   src: string;
   filename?: string;
   kind?: string;
   caption?: string;
+  mediaType: "image" | "video";
 }
 
 interface MessageItem {
@@ -50,7 +52,8 @@ interface MessageItem {
   modeName?: string;
   modelName?: string;
   trace?: string[];
-  image?: ImageAttachment;
+  image?: MediaAttachment;
+  video?: MediaAttachment;
 }
 
 interface SessionItem {
@@ -96,8 +99,23 @@ const BASE_URL = (
 const AGENT_API_KEY =
   process.env.NEXT_PUBLIC_NOVA_API_KEY || "sk_kartiksharma@2005";
 
+const VIDEO_EXT_REGEX = /\.(mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i;
+const IMAGE_EXT_REGEX = /\.(png|jpg|jpeg|webp|gif|svg)(\?.*)?$/i;
+
 function normalizeBackendMode(mode: string): BackendMode {
   return mode === "chat" ? "chat" : "agent";
+}
+
+function resolveHrefWithBase(href?: string): string | undefined {
+  if (!href) return href;
+  const trimmed = href.trim();
+  if (
+    !trimmed ||
+    /^(https?:\/\/|mailto:|tel:|blob:|data:|#)/i.test(trimmed)
+  ) {
+    return trimmed;
+  }
+  return `${BASE_URL}${trimmed.startsWith("/") ? "" : "/"}${trimmed}`;
 }
 
 function cleanTextForSpeech(raw: string): string {
@@ -111,7 +129,9 @@ function cleanTextForSpeech(raw: string): string {
     .trim();
 }
 
-function pickFemaleVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+function pickFemaleVoice(
+  voices: SpeechSynthesisVoice[]
+): SpeechSynthesisVoice | null {
   if (!voices.length) return null;
 
   const femaleNameRegex =
@@ -221,16 +241,24 @@ const MARKDOWN_COMPONENTS: Components = {
   strong: ({ children }) => (
     <strong className="font-bold text-white">{children}</strong>
   ),
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="font-medium text-sky-400 underline decoration-sky-400/40 underline-offset-2 hover:text-sky-300"
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => {
+    const resolvedHref = resolveHrefWithBase(href);
+    const isDownloadLink = Boolean(
+      resolvedHref && resolvedHref.includes("/api/v1/agents/download/")
+    );
+
+    return (
+      <a
+        href={resolvedHref}
+        target="_blank"
+        rel="noopener noreferrer"
+        download={isDownloadLink ? "" : undefined}
+        className="font-medium text-sky-400 underline decoration-sky-400/40 underline-offset-2 hover:text-sky-300"
+      >
+        {children}
+      </a>
+    );
+  },
   blockquote: ({ children }) => (
     <blockquote className="my-2.5 rounded-r-xl border-l-2 border-amber-400 bg-zinc-900/70 px-3.5 py-2 text-xs text-zinc-300 sm:text-sm">
       {children}
@@ -244,10 +272,7 @@ const MARKDOWN_COMPONENTS: Components = {
 
     if (isBlock) {
       return (
-        <CodeBlackboard
-          language={match?.[1] || "code"}
-          codeText={rawCode}
-        />
+        <CodeBlackboard language={match?.[1] || "code"} codeText={rawCode} />
       );
     }
 
@@ -320,7 +345,8 @@ const INITIAL_SESSIONS: SessionItem[] = [
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Accept: "application/json, text/event-stream, text/plain, image/*, */*",
+    Accept:
+      "application/json, text/event-stream, text/plain, image/*, video/*, */*",
   };
   if (AGENT_API_KEY) {
     headers["X-API-Key"] = AGENT_API_KEY;
@@ -343,28 +369,52 @@ function buildDownloadUrl(filename?: string, kind?: string): string {
   return url.toString();
 }
 
-async function resolveAssetImage(
+function detectMediaType(
+  candidate: string,
+  kind?: string,
+  contentType?: string
+): "image" | "video" {
+  if (
+    kind?.toLowerCase().includes("video") ||
+    contentType?.startsWith("video/") ||
+    VIDEO_EXT_REGEX.test(candidate)
+  ) {
+    return "video";
+  }
+  return "image";
+}
+
+async function resolveAssetMedia(
   candidate: string,
   kind = "image"
-): Promise<ImageAttachment | null> {
+): Promise<MediaAttachment | null> {
   const trimmed = candidate.trim();
   if (!trimmed) return null;
 
+  const inferredType = detectMediaType(trimmed, kind);
+
   if (
     trimmed.startsWith("data:image/") ||
+    trimmed.startsWith("data:video/") ||
     trimmed.startsWith("blob:") ||
-    /^https?:\/\/.+\.(png|jpg|jpeg|webp|gif)(\?.*)?$/i.test(trimmed)
+    (/^https?:\/\//i.test(trimmed) &&
+      (IMAGE_EXT_REGEX.test(trimmed) || VIDEO_EXT_REGEX.test(trimmed)))
   ) {
+    const fallbackName =
+      inferredType === "video" ? "generated-video.mp4" : "generated-image.png";
     return {
       src: trimmed,
-      filename: trimmed.split("/").pop()?.split("?")[0] || "generated-image.png",
+      filename: trimmed.split("/").pop()?.split("?")[0] || fallbackName,
       kind,
-      caption: "Generated Image",
+      caption:
+        inferredType === "video" ? "Generated Video" : "Generated Image",
+      mediaType: inferredType,
     };
   }
 
   let downloadEndpoint = buildDownloadUrl(undefined, kind);
-  let resolvedFilename = "latest-asset.png";
+  let resolvedFilename =
+    inferredType === "video" ? "latest-asset.mp4" : "latest-asset.png";
 
   if (trimmed === "latest" || trimmed === "/api/v1/agents/download/latest") {
     downloadEndpoint = buildDownloadUrl(undefined, kind);
@@ -388,7 +438,13 @@ async function resolveAssetImage(
   if (!res.ok) return null;
 
   const contentType = res.headers.get("content-type") || "";
-  if (contentType.startsWith("image/") || contentType === "application/octet-stream") {
+  const finalMediaType = detectMediaType(resolvedFilename, kind, contentType);
+
+  if (
+    contentType.startsWith("image/") ||
+    contentType.startsWith("video/") ||
+    contentType === "application/octet-stream"
+  ) {
     const blob = await res.blob();
     const objectUrl = URL.createObjectURL(blob);
     return {
@@ -396,32 +452,55 @@ async function resolveAssetImage(
       filename: resolvedFilename,
       kind,
       caption: resolvedFilename,
+      mediaType: finalMediaType,
     };
   }
 
   if (contentType.includes("application/json")) {
     const data = await res.json();
     const urlFromJson =
-      data?.url || data?.image_url || data?.download_url || data?.file_url;
+      data?.url ||
+      data?.video_url ||
+      data?.image_url ||
+      data?.download_url ||
+      data?.file_url;
+
     if (typeof urlFromJson === "string" && urlFromJson) {
       const fullUrl = urlFromJson.startsWith("http")
         ? urlFromJson
         : `${BASE_URL}${urlFromJson.startsWith("/") ? "" : "/"}${urlFromJson}`;
+      const jsonType = detectMediaType(
+        data?.filename || fullUrl,
+        data?.kind || kind
+      );
       return {
         src: fullUrl,
         filename: data?.filename || resolvedFilename,
         kind: data?.kind || kind,
-        caption: data?.filename || "Generated Image",
+        caption:
+          data?.filename ||
+          (jsonType === "video" ? "Generated Video" : "Generated Image"),
+        mediaType: jsonType,
       };
     }
+
     if (typeof data?.base64 === "string" && data.base64) {
+      const prefix =
+        finalMediaType === "video"
+          ? "data:video/mp4;base64,"
+          : "data:image/png;base64,";
       return {
         src: data.base64.startsWith("data:")
           ? data.base64
-          : `data:image/png;base64,${data.base64}`,
+          : `${prefix}${data.base64}`,
         filename: data?.filename || resolvedFilename,
         kind: data?.kind || kind,
-        caption: data?.filename || "Generated Image",
+        caption:
+          data?.filename ||
+          (finalMediaType === "video"
+            ? "Generated Video"
+            : "Generated Image"),
+        mediaType: finalMediaType,
       };
     }
   }
@@ -466,6 +545,7 @@ function parseSseLine(rawLine: string, currentEvent: string): ParsedSseResult {
       const assetRef =
         parsed?.filename ||
         parsed?.file_name ||
+        parsed?.video_url ||
         parsed?.image_url ||
         parsed?.url ||
         parsed?.download_latest;
@@ -548,7 +628,9 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
   const [micNote, setMicNote] = useState<string>("");
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
   const [openTraces, setOpenTraces] = useState<Record<string, boolean>>({});
-  const [previewImage, setPreviewImage] = useState<ImageAttachment | null>(null);
+  const [previewMedia, setPreviewMedia] = useState<MediaAttachment | null>(
+    null
+  );
 
   const abortRef = useRef<AbortController | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -568,7 +650,11 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
   };
 
   const speakOnListenClick = (rawText: string) => {
-    if (!voiceEnabled || typeof window === "undefined" || !("speechSynthesis" in window)) {
+    if (
+      !voiceEnabled ||
+      typeof window === "undefined" ||
+      !("speechSynthesis" in window)
+    ) {
       return;
     }
     const clean = cleanTextForSpeech(rawText);
@@ -613,8 +699,8 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (previewImage) {
-          setPreviewImage(null);
+        if (previewMedia) {
+          setPreviewMedia(null);
         } else if (drawerOpen) {
           setDrawerOpen(false);
         } else {
@@ -785,7 +871,9 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
     const userMsgId = `u-${Date.now()}`;
     const agentMsgId = `a-${Date.now() + 1}`;
     const selectedMode = overrideMode ?? currentMode;
-    const backendMode = normalizeBackendMode(selectedMode.apiMode ?? selectedMode.id);
+    const backendMode = normalizeBackendMode(
+      selectedMode.apiMode ?? selectedMode.id
+    );
 
     if (!rawText) {
       setInput("");
@@ -930,22 +1018,29 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
       const fileMatch =
         detectedAsset ||
         accumulated.match(
-          /(?:\/api\/v1\/agents\/download\/[^\s"')`]+|[\w.-]+\.(?:png|jpg|jpeg|webp|gif))/i
+          /(?:\/api\/v1\/agents\/download\/[^\s"')`]+|[\w.-]+\.(?:png|jpg|jpeg|webp|gif|mp4|webm|mov|mkv))/i
         )?.[0];
 
+      const asksForVideo = /\b(video|clip|reel|animation|animate|mp4|movie)\b/i.test(
+        text
+      );
       const asksForImage = /\b(image|photo|picture|img|poster|banner|logo|draw)\b/i.test(
         text
       );
 
-      if (fileMatch || asksForImage) {
-        const imageAsset = await resolveAssetImage(
+      if (fileMatch || asksForVideo || asksForImage) {
+        const defaultKind =
+          detectedKind || (asksForVideo ? "video" : "image");
+        const mediaAsset = await resolveAssetMedia(
           fileMatch || "latest",
-          detectedKind || "image"
+          defaultKind
         );
-        if (imageAsset) {
+        if (mediaAsset) {
           updateAgentMessage(targetSessionId, agentMsgId, (m) => ({
             ...m,
-            image: imageAsset,
+            ...(mediaAsset.mediaType === "video"
+              ? { video: mediaAsset }
+              : { image: mediaAsset }),
           }));
         }
       }
@@ -974,10 +1069,12 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
     runPrompt();
   };
 
-  const handleDownloadImage = (img: ImageAttachment) => {
+  const handleDownloadMedia = (media: MediaAttachment) => {
     const link = document.createElement("a");
-    link.href = img.src;
-    link.download = img.filename || "nova-image.png";
+    link.href = media.src;
+    link.download =
+      media.filename ||
+      (media.mediaType === "video" ? "nova-video.mp4" : "nova-image.png");
     link.rel = "noopener noreferrer";
     document.body.appendChild(link);
     link.click();
@@ -988,9 +1085,9 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
 
   return (
     <div className="relative flex h-dvh w-full overflow-hidden bg-[#05070d] text-zinc-100 [color-scheme:dark]">
-      {previewImage && (
+      {previewMedia && (
         <div
-          onClick={() => setPreviewImage(null)}
+          onClick={() => setPreviewMedia(null)}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
         >
           <div
@@ -999,12 +1096,15 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
           >
             <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
               <span className="truncate text-xs font-semibold text-zinc-200">
-                {previewImage.filename || "Generated Image"}
+                {previewMedia.filename ||
+                  (previewMedia.mediaType === "video"
+                    ? "Generated Video"
+                    : "Generated Image")}
               </span>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => handleDownloadImage(previewImage)}
+                  onClick={() => handleDownloadMedia(previewMedia)}
                   className="inline-flex items-center gap-1.5 rounded-xl border border-amber-400/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/25"
                 >
                   <Download size={13} />
@@ -1012,7 +1112,7 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPreviewImage(null)}
+                  onClick={() => setPreviewMedia(null)}
                   aria-label="Close preview"
                   className="flex h-8 w-8 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white"
                 >
@@ -1021,11 +1121,21 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
               </div>
             </div>
             <div className="flex max-h-[78dvh] items-center justify-center overflow-auto bg-[#090b12] p-4">
-              <img
-                src={previewImage.src}
-                alt={previewImage.caption || "Generated agent image"}
-                className="max-h-[72dvh] w-auto rounded-2xl object-contain"
-              />
+              {previewMedia.mediaType === "video" ? (
+                <video
+                  src={previewMedia.src}
+                  controls
+                  autoPlay
+                  playsInline
+                  className="max-h-[72dvh] w-auto rounded-2xl object-contain"
+                />
+              ) : (
+                <img
+                  src={previewMedia.src}
+                  alt={previewMedia.caption || "Generated agent image"}
+                  className="max-h-[72dvh] w-auto rounded-2xl object-contain"
+                />
+              )}
             </div>
           </div>
         </div>
@@ -1153,7 +1263,9 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
                 if (voiceEnabled) stopSpeech();
                 setVoiceEnabled((v) => !v);
               }}
-              aria-label={voiceEnabled ? "Mute NovaAI voice" : "Unmute NovaAI voice"}
+              aria-label={
+                voiceEnabled ? "Mute NovaAI voice" : "Unmute NovaAI voice"
+              }
               className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
                 voiceEnabled
                   ? "border-amber-400/40 bg-amber-400/15 text-amber-300"
@@ -1161,7 +1273,13 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
               }`}
             >
               {voiceEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
-              <span>{speaking ? "Speaking..." : voiceEnabled ? "Voice Ready" : "Muted"}</span>
+              <span>
+                {speaking
+                  ? "Speaking..."
+                  : voiceEnabled
+                  ? "Voice Ready"
+                  : "Muted"}
+              </span>
             </button>
 
             <button
@@ -1352,7 +1470,7 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
                               <div className="flex shrink-0 items-center gap-1.5">
                                 <button
                                   type="button"
-                                  onClick={() => setPreviewImage(msg.image!)}
+                                  onClick={() => setPreviewMedia(msg.image!)}
                                   aria-label="Expand image"
                                   className="rounded-lg border border-zinc-700/80 bg-zinc-800/80 p-1.5 text-zinc-300 hover:border-amber-400/50 hover:text-amber-300"
                                 >
@@ -1360,7 +1478,7 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => handleDownloadImage(msg.image!)}
+                                  onClick={() => handleDownloadMedia(msg.image!)}
                                   aria-label="Download image"
                                   className="rounded-lg border border-zinc-700/80 bg-zinc-800/80 p-1.5 text-zinc-300 hover:border-amber-400/50 hover:text-amber-300"
                                 >
@@ -1370,7 +1488,7 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
                             </div>
                             <button
                               type="button"
-                              onClick={() => setPreviewImage(msg.image!)}
+                              onClick={() => setPreviewMedia(msg.image!)}
                               className="block w-full bg-[#090b12] p-2 text-left"
                             >
                               <img
@@ -1379,6 +1497,49 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
                                 className="max-h-96 w-full rounded-xl object-contain"
                               />
                             </button>
+                          </div>
+                        )}
+
+                        {msg.video && (
+                          <div className="max-w-md overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/90 shadow-xl">
+                            <div className="flex items-center justify-between border-b border-zinc-800/80 px-3.5 py-2 text-[11px] text-zinc-300">
+                              <span className="flex items-center gap-1.5 truncate font-medium">
+                                <VideoIcon
+                                  size={13}
+                                  className="shrink-0 text-amber-400"
+                                />
+                                <span className="truncate">
+                                  {msg.video.filename || "Generated Video"}
+                                </span>
+                              </span>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewMedia(msg.video!)}
+                                  aria-label="Expand video"
+                                  className="rounded-lg border border-zinc-700/80 bg-zinc-800/80 p-1.5 text-zinc-300 hover:border-amber-400/50 hover:text-amber-300"
+                                >
+                                  <Maximize2 size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownloadMedia(msg.video!)}
+                                  aria-label="Download video"
+                                  className="rounded-lg border border-zinc-700/80 bg-zinc-800/80 p-1.5 text-zinc-300 hover:border-amber-400/50 hover:text-amber-300"
+                                >
+                                  <Download size={12} />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="bg-[#090b12] p-2">
+                              <video
+                                src={msg.video.src}
+                                controls
+                                playsInline
+                                preload="metadata"
+                                className="max-h-96 w-full rounded-xl object-contain"
+                              />
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1454,7 +1615,9 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
                 <button
                   type="button"
                   onClick={toggleMic}
-                  aria-label={listening ? "Stop voice input" : "Start voice input"}
+                  aria-label={
+                    listening ? "Stop voice input" : "Start voice input"
+                  }
                   className={`flex h-9 w-9 items-center justify-center rounded-full border transition active:scale-95 ${
                     listening
                       ? "animate-pulse border-amber-400 bg-amber-400/20 text-amber-300"
