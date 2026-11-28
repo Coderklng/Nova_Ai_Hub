@@ -101,6 +101,8 @@ const AGENT_API_KEY =
 
 const VIDEO_EXT_REGEX = /\.(mp4|webm|mov|mkv|avi|m4v)(\?.*)?$/i;
 const IMAGE_EXT_REGEX = /\.(png|jpg|jpeg|webp|gif|svg)(\?.*)?$/i;
+const DOWNLOAD_TOKEN_REGEX =
+  /(\/api\/v1\/agents\/download\/[^\s`"'()<>]+|https?:\/\/[^\s`"'()<>]+\/api\/v1\/agents\/download\/[^\s`"'()<>]+|[\w./-]+\.(?:pptx|ppt|pdf|docx|doc|xlsx|xls|csv|zip|tar|gz|txt|json|mp4|webm|mov|mp3|wav))/gi;
 
 function normalizeBackendMode(mode: string): BackendMode {
   return mode === "chat" ? "chat" : "agent";
@@ -116,6 +118,61 @@ function resolveHrefWithBase(href?: string): string | undefined {
     return trimmed;
   }
   return `${BASE_URL}${trimmed.startsWith("/") ? "" : "/"}${trimmed}`;
+}
+
+function renderTextWithDownloadLinks(nodes: React.ReactNode): React.ReactNode {
+  return React.Children.map(nodes, (node) => {
+    if (typeof node === "string") {
+      const parts = node.split(DOWNLOAD_TOKEN_REGEX);
+      if (parts.length === 1) return node;
+
+      return parts.map((part, idx) => {
+        if (!part) return null;
+        const isMatch =
+          /^\/api\/v1\/agents\/download\//i.test(part) ||
+          /^https?:\/\/.+\/api\/v1\/agents\/download\//i.test(part) ||
+          /^[\w./-]+\.(?:pptx|ppt|pdf|docx|doc|xlsx|xls|csv|zip|tar|gz|txt|json|mp4|webm|mov|mp3|wav)$/i.test(
+            part
+          );
+
+        if (!isMatch) return part;
+
+        const cleanToken = part.replace(/[.,;:!?]+$/, "");
+        const trailingPunct = part.slice(cleanToken.length);
+        const fullUrl = resolveHrefWithBase(cleanToken);
+        const fileLabel =
+          cleanToken.split("/").pop()?.split("?")[0] || cleanToken;
+
+        return (
+          <React.Fragment key={idx}>
+            <a
+              href={fullUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              download={fileLabel}
+              className="inline-flex items-center gap-1 font-semibold text-sky-400 underline decoration-sky-400/50 underline-offset-2 hover:text-sky-300"
+            >
+              <span>Download {fileLabel}</span>
+            </a>
+            {trailingPunct}
+          </React.Fragment>
+        );
+      });
+    }
+
+    if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+      if (node.type === "a" || node.type === "code" || node.type === "pre") {
+        return node;
+      }
+      if (node.props?.children) {
+        return React.cloneElement(node, {
+          children: renderTextWithDownloadLinks(node.props.children),
+        });
+      }
+    }
+
+    return node;
+  });
 }
 
 function cleanTextForSpeech(raw: string): string {
@@ -224,7 +281,7 @@ const MARKDOWN_COMPONENTS: Components = {
   ),
   p: ({ children }) => (
     <p className="my-1.5 text-xs leading-7 text-zinc-100 sm:text-[15px]">
-      {children}
+      {renderTextWithDownloadLinks(children)}
     </p>
   ),
   ul: ({ children }) => (
@@ -237,7 +294,9 @@ const MARKDOWN_COMPONENTS: Components = {
       {children}
     </ol>
   ),
-  li: ({ children }) => <li className="pl-0.5">{children}</li>,
+  li: ({ children }) => (
+    <li className="pl-0.5">{renderTextWithDownloadLinks(children)}</li>
+  ),
   strong: ({ children }) => (
     <strong className="font-bold text-white">{children}</strong>
   ),
@@ -261,7 +320,7 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   blockquote: ({ children }) => (
     <blockquote className="my-2.5 rounded-r-xl border-l-2 border-amber-400 bg-zinc-900/70 px-3.5 py-2 text-xs text-zinc-300 sm:text-sm">
-      {children}
+      {renderTextWithDownloadLinks(children)}
     </blockquote>
   ),
   pre: ({ children }) => <>{children}</>,
@@ -273,6 +332,25 @@ const MARKDOWN_COMPONENTS: Components = {
     if (isBlock) {
       return (
         <CodeBlackboard language={match?.[1] || "code"} codeText={rawCode} />
+      );
+    }
+
+    if (
+      /^\/api\/v1\/agents\/download\//i.test(rawCode) ||
+      /^https?:\/\/.+\/api\/v1\/agents\/download\//i.test(rawCode)
+    ) {
+      const fullUrl = resolveHrefWithBase(rawCode);
+      const fileLabel = rawCode.split("/").pop()?.split("?")[0] || rawCode;
+      return (
+        <a
+          href={fullUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          download={fileLabel}
+          className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-300 underline underline-offset-2 hover:bg-sky-500/20 sm:text-xs"
+        >
+          <span>Download {fileLabel}</span>
+        </a>
       );
     }
 
@@ -298,7 +376,9 @@ const MARKDOWN_COMPONENTS: Components = {
     <th className="px-3 py-2 font-semibold">{children}</th>
   ),
   td: ({ children }) => (
-    <td className="border-t border-zinc-800/80 px-3 py-2">{children}</td>
+    <td className="border-t border-zinc-800/80 px-3 py-2">
+      {renderTextWithDownloadLinks(children)}
+    </td>
   ),
 };
 
