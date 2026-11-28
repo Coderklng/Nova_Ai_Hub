@@ -120,6 +120,76 @@ function resolveHrefWithBase(href?: string): string | undefined {
   return `${BASE_URL}${trimmed.startsWith("/") ? "" : "/"}${trimmed}`;
 }
 
+function getAuthHeaders(includeJsonContentType = true): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept:
+      "application/json, text/event-stream, text/plain, image/*, video/*, */*",
+  };
+  if (includeJsonContentType) {
+    headers["Content-Type"] = "application/json";
+  }
+  if (AGENT_API_KEY) {
+    headers["X-API-Key"] = AGENT_API_KEY;
+    headers["Authorization"] = `Bearer ${AGENT_API_KEY}`;
+  }
+  return headers;
+}
+
+async function triggerAuthenticatedDownload(
+  rawUrl: string,
+  suggestedName?: string
+): Promise<void> {
+  const resolvedUrl = resolveHrefWithBase(rawUrl);
+  if (!resolvedUrl) return;
+
+  const fallbackName =
+    suggestedName ||
+    resolvedUrl.split("/").pop()?.split("?")[0] ||
+    "download-file";
+
+  if (
+    resolvedUrl.startsWith("blob:") ||
+    resolvedUrl.startsWith("data:") ||
+    (!resolvedUrl.includes("/api/v1/agents/download/") &&
+      !resolvedUrl.startsWith(BASE_URL))
+  ) {
+    const link = document.createElement("a");
+    link.href = resolvedUrl;
+    link.download = fallbackName;
+    link.rel = "noopener noreferrer";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    return;
+  }
+
+  const res = await fetch(resolvedUrl, {
+    method: "GET",
+    headers: getAuthHeaders(false),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(errText || `Download failed (${res.status})`);
+  }
+
+  const disposition = res.headers.get("content-disposition") || "";
+  const headerNameMatch = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+  const finalFilename = headerNameMatch?.[1]
+    ? decodeURIComponent(headerNameMatch[1])
+    : fallbackName;
+
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = finalFilename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+}
+
 function renderTextWithDownloadLinks(nodes: React.ReactNode): React.ReactNode {
   return React.Children.map(nodes, (node) => {
     if (typeof node === "string") {
@@ -150,6 +220,12 @@ function renderTextWithDownloadLinks(nodes: React.ReactNode): React.ReactNode {
               target="_blank"
               rel="noopener noreferrer"
               download={fileLabel}
+              onClick={(e) => {
+                if (fullUrl) {
+                  e.preventDefault();
+                  void triggerAuthenticatedDownload(fullUrl, fileLabel);
+                }
+              }}
               className="inline-flex items-center gap-1 font-semibold text-sky-400 underline decoration-sky-400/50 underline-offset-2 hover:text-sky-300"
             >
               <span>Download {fileLabel}</span>
@@ -305,6 +381,7 @@ const MARKDOWN_COMPONENTS: Components = {
     const isDownloadLink = Boolean(
       resolvedHref && resolvedHref.includes("/api/v1/agents/download/")
     );
+    const fileLabel = resolvedHref?.split("/").pop()?.split("?")[0];
 
     return (
       <a
@@ -312,6 +389,12 @@ const MARKDOWN_COMPONENTS: Components = {
         target="_blank"
         rel="noopener noreferrer"
         download={isDownloadLink ? "" : undefined}
+        onClick={(e) => {
+          if (isDownloadLink && resolvedHref) {
+            e.preventDefault();
+            void triggerAuthenticatedDownload(resolvedHref, fileLabel);
+          }
+        }}
         className="font-medium text-sky-400 underline decoration-sky-400/40 underline-offset-2 hover:text-sky-300"
       >
         {children}
@@ -347,6 +430,12 @@ const MARKDOWN_COMPONENTS: Components = {
           target="_blank"
           rel="noopener noreferrer"
           download={fileLabel}
+          onClick={(e) => {
+            if (fullUrl) {
+              e.preventDefault();
+              void triggerAuthenticatedDownload(fullUrl, fileLabel);
+            }
+          }}
           className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-300 underline underline-offset-2 hover:bg-sky-500/20 sm:text-xs"
         >
           <span>Download {fileLabel}</span>
@@ -421,19 +510,6 @@ const INITIAL_SESSIONS: SessionItem[] = [
     messages: [],
   },
 ];
-
-function getAuthHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept:
-      "application/json, text/event-stream, text/plain, image/*, video/*, */*",
-  };
-  if (AGENT_API_KEY) {
-    headers["X-API-Key"] = AGENT_API_KEY;
-    headers["Authorization"] = `Bearer ${AGENT_API_KEY}`;
-  }
-  return headers;
-}
 
 function buildDownloadUrl(filename?: string, kind?: string): string {
   if (filename && filename.trim()) {
@@ -513,7 +589,7 @@ async function resolveAssetMedia(
 
   const res = await fetch(downloadEndpoint, {
     method: "GET",
-    headers: getAuthHeaders(),
+    headers: getAuthHeaders(false),
   });
   if (!res.ok) return null;
 
@@ -996,7 +1072,7 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
     try {
       const response = await fetch(`${BASE_URL}/api/v1/agents/stream`, {
         method: "POST",
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(true),
         body: JSON.stringify({
           prompt: text,
           session_id: targetSessionId,
@@ -1150,15 +1226,10 @@ export default function AgentPage({ onBackHome }: AgentPageProps) {
   };
 
   const handleDownloadMedia = (media: MediaAttachment) => {
-    const link = document.createElement("a");
-    link.href = media.src;
-    link.download =
+    const fallbackName =
       media.filename ||
       (media.mediaType === "video" ? "nova-video.mp4" : "nova-image.png");
-    link.rel = "noopener noreferrer";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    void triggerAuthenticatedDownload(media.src, fallbackName);
   };
 
   const messages: MessageItem[] = currentSession?.messages ?? [];
